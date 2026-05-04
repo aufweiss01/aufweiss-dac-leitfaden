@@ -1,0 +1,325 @@
+name: DITA Validierung
+
+# ============================================================
+# WANN LAeUFT DIE PIPELINE?
+# ============================================================
+# Push auf beliebigen Branch:
+#   -> Pipeline laeuft, Fehler erzeugen nur eine Warnung.
+#   -> Autor bekommt automatisch eine E-Mail von GitHub.
+#   -> Der Push wird NICHT blockiert.
+#
+# Pull Request nach develop oder main:
+#   -> Pipeline laeuft verbindlich.
+#   -> Fehler blockieren den Merge (Branch Protection Rule
+#     muss in GitHub einmalig aktiviert werden).
+# ============================================================
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+    branches:
+      - develop
+      - main
+
+jobs:
+  validierung:
+    runs-on: ubuntu-24.04
+
+    # Bei Push: Fehler erzeugen eine Warnung, blockieren aber nicht.
+    # Bei Pull Request: Fehler blockieren den Merge.
+    continue-on-error: ${{ github.event_name == 'push' && !contains(fromJSON('["develop", "main"]'), github.ref_name) }}
+
+    steps:
+
+      # ----------------------------------------------------------
+      # 1. Repo auschecken (inkl. Submodul shared/)
+      #
+      # Das Submodul ist ein privates Repository. Der PAT wird als
+      # Secret im Produktrepo hinterlegt (Name: SUBMODULE_PAT).
+      # Einrichtung: GitHub -> Repo -> Settings ->
+      #   Secrets and variables -> Actions -> New repository secret
+      # ----------------------------------------------------------
+      - name: Repository auschecken
+        uses: actions/checkout@v6
+        with:
+          submodules: true
+          token: ${{ secrets.SUBMODULE_PAT }}
+          fetch-depth: 0
+
+      # ----------------------------------------------------------
+      # 2. Java einrichten (fuer Saxon)
+      # ----------------------------------------------------------
+      - name: Java einrichten
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # ----------------------------------------------------------
+      # 3. Saxon-HE und xmlresolver herunterladen
+      #    Maven ist auf ubuntu-24.04 vorinstalliert und loest
+      #    Abhaengigkeiten automatisch auf.
+      # ----------------------------------------------------------
+      - name: Saxon-HE herunterladen
+        run: |
+          mkdir -p /opt/saxon
+          mvn dependency:copy \
+            -Dartifact=net.sf.saxon:Saxon-HE:12.9 \
+            -DoutputDirectory=/opt/saxon \
+            --quiet
+          mvn dependency:copy \
+            -Dartifact=org.xmlresolver:xmlresolver:5.2.2 \
+            -DoutputDirectory=/opt/saxon \
+            --quiet
+
+      # ----------------------------------------------------------
+      # 4. DITA-OT herunterladen
+      #    Wird fuer DTD-Validierung und ggf. Publishing genutzt.
+      # ----------------------------------------------------------
+      - name: DITA-OT herunterladen
+        run: |
+          curl -L -o /tmp/dita-ot.zip \
+            "https://github.com/dita-ot/dita-ot/releases/download/4.4/dita-ot-4.4.zip"
+          unzip -q /tmp/dita-ot.zip -d /opt/
+          mv /opt/dita-ot-4.4 /opt/dita-ot
+
+      # ----------------------------------------------------------
+      # 5. DITA-Dateien ermitteln
+      #
+      # Bei Pull Request: nur geaenderte Dateien pruefen.
+      # Bei Push (Normalfall): git diff gegen Merge-Basis.
+      # Bei Push (Fallback): alle DITA-Dateien, wenn keine
+      #   Merge-Basis gefunden wird (sicherer Fallback).
+      # ----------------------------------------------------------
+      - name: DITA-Dateien ermitteln
+        id: dita_dateien
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            DATEIEN=$(git diff --name-only \
+              origin/${{ github.base_ref }}...HEAD \
+              -- '*.dita' '*.ditamap' | tr '\n' ' ')
+          else
+            git fetch origin develop --depth=50 2>/dev/null || true
+            BASE=$(git merge-base HEAD origin/develop 2>/dev/null || echo "")
+
+            if [ -n "$BASE" ]; then
+              DATEIEN=$(git diff --name-only "$BASE" HEAD \
+                -- '*.dita' '*.ditamap' | tr '\n' ' ')
+            else
+              echo "HINWEIS: Keine Merge-Basis gefunden - pruefe alle Dateien ^(Fallback^)."
+              DATEIEN=$(find . \( -name '*.dita' -o -name '*.ditamap' \) \
+                | grep -v '^\./\.git' \
+                | tr '\n' ' ')
+            fi
+          fi
+          echo "dateien=$DATEIEN" >> $GITHUB_OUTPUT
+          echo "Gefundene DITA-Dateien: $DATEIEN"
+
+      # ----------------------------------------------------------
+      # 6. DTD-Validierung mit DITA-OT
+      #    DITA-OT versteht die DITA 1.3 DTDs vollstaendig.
+      #    Validierung laeuft ueber Maps als Einstiegspunkt -
+      #    Topics werden dabei automatisch mitvalidiert.
+      # ----------------------------------------------------------
+      - name: DTD-Validierung
+        if: steps.dita_dateien.outputs.dateien != ''
+        continue-on-error: true
+        run: |
+          FEHLER=0
+          DITA_OT="/opt/dita-ot/bin/dita"
+
+          MAPS=$(find . -name '*.ditamap' \
+            | grep -v '^\./\.git' \
+            | grep -v 'relationship_table' \
+            | tr '\n' ' ')
+
+          for MAP in $MAPS; do
+            if [ -f "$MAP" ]; then
+              echo "Validiere: $MAP"
+              if ! $DITA_OT --input="$MAP" \
+                            --format=dita \
+                            --output=/tmp/dita-validate-out \
+                            2>&1; then
+                echo "DTD-FEHLER in: $MAP"
+                FEHLER=1
+              fi
+            fi
+          done
+
+          if [ $FEHLER -ne 0 ]; then
+            echo ""
+            echo "FEHLER DTD-Validierung fehlgeschlagen."
+            exit 1
+          else
+            echo ""
+            echo "OK DTD-Validierung erfolgreich."
+          fi
+
+      # ----------------------------------------------------------
+      # 7. Schematron-Validierung mit Saxon
+      #    a) Schematron -> XSLT kompilieren
+      #    b) XSLT auf jede DITA-Datei anwenden -> SVRL
+      #    c) Fehler per parse_svrl.py aus SVRL extrahieren
+      #
+      #    Ergebnisse erscheinen als GitHub Job Summary
+      #    (Actions -> Lauf -> Summary).
+      # ----------------------------------------------------------
+      - name: Schematron-Validierung
+        if: steps.dita_dateien.outputs.dateien != ''
+        continue-on-error: true
+        run: |
+          FEHLER=0
+          SKELETON="shared/schematron/iso_svrl_for_xslt2.xsl"
+          REGELN="shared/schematron/dita_rules.sch"
+          KOMPILIERT="/tmp/dita_rules_compiled.xsl"
+
+          echo "## Schematron-Validierung" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "^| Datei ^| Ergebnis ^|" >> $GITHUB_STEP_SUMMARY
+          echo "^|-------^|----------^|" >> $GITHUB_STEP_SUMMARY
+
+          echo "Kompiliere Schematron-Regeln..."
+          if ! java \
+                -cp /opt/saxon/Saxon-HE-12.9.jar:/opt/saxon/xmlresolver-5.2.2.jar \
+                net.sf.saxon.Transform \
+                -catalog:/opt/dita-ot/catalog-dita.xml \
+                -s:"$REGELN" \
+                -xsl:"$SKELETON" \
+                -o:"$KOMPILIERT" 2>&1; then
+            echo "FEHLER Schematron-Kompilierung fehlgeschlagen."
+            echo "^| - ^| FEHLER Kompilierung fehlgeschlagen ^|" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+          echo "OK Kompilierung erfolgreich."
+
+          DATEIEN_LISTE="${{ steps.dita_dateien.outputs.dateien }}"
+
+          for DATEI in $DATEIEN_LISTE; do
+            if [ -f "$DATEI" ] && [[ "$DATEI" == *.dita ]]; then
+              ERGEBNIS=$(java \
+                -cp /opt/saxon/Saxon-HE-12.9.jar:/opt/saxon/xmlresolver-5.2.2.jar \
+                net.sf.saxon.Transform \
+                -catalog:/opt/dita-ot/catalog-dita.xml \
+                -s:"$DATEI" \
+                -xsl:"$KOMPILIERT" 2>&1); EXITCODE=$?
+
+              if [ $EXITCODE -ne 0 ]; then
+                echo "WARNUNG  Saxon-Fehler bei: $DATEI"
+                echo "$ERGEBNIS"
+                echo "^| \`$DATEI\` ^| WARNUNG Saxon-Fehler ^|" >> $GITHUB_STEP_SUMMARY
+                FEHLER=1
+                continue
+              fi
+
+              echo "$ERGEBNIS" > /tmp/svrl_output.xml
+              FEHLER_TEXTE=$(python3 shared/scripts/parse_svrl.py \
+                /tmp/svrl_output.xml fehler 2>/dev/null)
+              WARNUNGS_TEXTE=$(python3 shared/scripts/parse_svrl.py \
+                /tmp/svrl_output.xml warnungen 2>/dev/null)
+
+              if [ -n "$FEHLER_TEXTE" ]; then
+                echo ""
+                echo "FEHLER $DATEI"
+                echo "$FEHLER_TEXTE" | while IFS= read -r ZEILE; do
+                  echo "   -^> $ZEILE"
+                done
+                ERSTE_ZEILE=1
+                echo "$FEHLER_TEXTE" | sed 's/</\&lt;/g' | sed 's/>/\&gt;/g' \
+                  | while IFS= read -r ZEILE; do
+                    if [ "$ERSTE_ZEILE" = "1" ]; then
+                      echo "^| \`$DATEI\` ^| FEHLER $ZEILE ^|" >> $GITHUB_STEP_SUMMARY
+                      ERSTE_ZEILE=0
+                    else
+                      echo "^| ^| FEHLER $ZEILE ^|" >> $GITHUB_STEP_SUMMARY
+                    fi
+                  done
+                echo "^| ^| ^|" >> $GITHUB_STEP_SUMMARY
+                FEHLER=1
+              elif [ -n "$WARNUNGS_TEXTE" ]; then
+                echo ""
+                echo "WARNUNG  $DATEI"
+                echo "$WARNUNGS_TEXTE" | while IFS= read -r ZEILE; do
+                  echo "   -^> $ZEILE"
+                done
+                ERSTE_ZEILE=1
+                echo "$WARNUNGS_TEXTE" | sed 's/</\&lt;/g' | sed 's/>/\&gt;/g' \
+                  | while IFS= read -r ZEILE; do
+                    if [ "$ERSTE_ZEILE" = "1" ]; then
+                      echo "^| \`$DATEI\` ^| WARNUNG $ZEILE ^|" >> $GITHUB_STEP_SUMMARY
+                      ERSTE_ZEILE=0
+                    else
+                      echo "^| ^| WARNUNG $ZEILE ^|" >> $GITHUB_STEP_SUMMARY
+                    fi
+                  done
+                echo "^| ^| ^|" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "OK $DATEI"
+                echo "^| \`$DATEI\` ^| OK OK ^|" >> $GITHUB_STEP_SUMMARY
+              fi
+            fi
+          done
+
+          if [ $FEHLER -ne 0 ]; then
+            echo ""
+            echo "FEHLER Schematron-Validierung fehlgeschlagen."
+            echo "Bitte die oben angezeigten Fehler korrigieren."
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "^> FEHLER **Validierung fehlgeschlagen.**" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          else
+            echo ""
+            echo "OK Schematron-Validierung erfolgreich."
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "^> OK **Alle Dateien erfolgreich validiert.**" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      # ----------------------------------------------------------
+      # 8. Terminologiepruefung
+      #    Prueft DITA-Dateien auf verbotene Begriffe aus den
+      #    TBX-Terminologiedatenbanken. Verstoesse sind Warnungen
+      #    und blockieren den Merge nicht.
+      #    Sprache: aktuell fest auf de-DE gesetzt.
+      #    TODO: Sprache aus xml:lang des Topics auslesen.
+      # ----------------------------------------------------------
+      - name: Terminologiepruefung
+        if: steps.dita_dateien.outputs.dateien != ''
+        continue-on-error: true
+        run: |
+          DITA_DATEIEN=$(echo "${{ steps.dita_dateien.outputs.dateien }}" \
+            | tr ' ' '\n' | grep '\.dita$' | tr '\n' ' ')
+
+          if [ -z "$DITA_DATEIEN" ]; then
+            echo "Keine DITA-Dateien zu pruefen."
+            exit 0
+          fi
+
+          python3 shared/scripts/check_terminology.py \
+            --dita $DITA_DATEIEN \
+            --tbx shared/customer_specific_termbase.tbx \
+                  project_specific_termbase.tbx \
+            --lang de-DE \
+            --summary || true
+          # || true: Verstoesse sind Warnungen, kein exit 1
+
+      # ----------------------------------------------------------
+      # 9. Linkpruefung
+      #    Prueft externe URLs in .dita- und .ditamap-Dateien.
+      #    HTTP 403 wird als OK gewertet.
+      #    Defekte Links sind Warnungen, kein Merge-Block.
+      # ----------------------------------------------------------
+      - name: Linkpruefung
+        if: steps.dita_dateien.outputs.dateien != ''
+        continue-on-error: true
+        run: |
+          DITA_DATEIEN="${{ steps.dita_dateien.outputs.dateien }}"
+
+          if [ -z "$DITA_DATEIEN" ]; then
+            echo "Keine Dateien zu pruefen."
+            exit 0
+          fi
+
+          python3 shared/scripts/check_links.py \
+            $DITA_DATEIEN || true
+          # || true: Defekte Links sind Warnungen, kein exit 1

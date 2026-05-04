@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE map PUBLIC "-//OASIS//DTD DITA 1.3 Map//EN" "map.dtd">
+<map>
+  <title>Reuse-Ressourcen (de-DE)</title>
+  <mapref href="project_specific_names.ditamap" format="ditamap"/>
+  <keydef keys="reuse_concepts"   href="reuse_concepts.dita"/>
+  <keydef keys="reuse_tasks"      href="reuse_tasks.dita"/>
+  <keydef keys="reuse_references" href="reuse_references.dita"/>
+</map>

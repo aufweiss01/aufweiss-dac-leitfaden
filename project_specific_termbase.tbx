@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE TBX-Default SYSTEM "TBXcoreStructV03_TBX-Default_strict.dtd">
+<TBX-Default xml:lang="de-DE">
+  <tbxHeader>
+    <fileDesc>
+      <titleStmt><title>Projektspezifische Terminologie</title></titleStmt>
+      <sourceDesc><p>Projektspezifische Terminologiedatenbank.</p></sourceDesc>
+    </fileDesc>
+  </tbxHeader>
+  <text><body>
+  </body></text>
+</TBX-Default>

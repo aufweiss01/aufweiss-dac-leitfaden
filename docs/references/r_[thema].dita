@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE reference PUBLIC "-//OASIS//DTD DITA 1.3 Reference//EN" "reference.dtd">
+<reference id="r_[thema]" xml:lang="de-DE">
+  <title>[Titel]</title>
+  <prolog>
+    <metadata>
+      <audience type="user" job="operating" experiencelevel="general"/>
+      <prodinfo>
+        <prodname>[Produktname]</prodname>
+        <vrmlist><vrm version="[Version]"/></vrmlist>
+      </prodinfo>
+      <othermeta name="component" content=""/>
+      <othermeta name="lifecycle-stage" content=""/>
+      <othermeta name="status" content="draft"/>
+      <othermeta name="assignee" content=""/>
+    </metadata>
+  </prolog>
+  <refbody>
+    <table>
+      <tgroup cols="2">
+        <thead>
+          <row><entry>Parameter</entry><entry>Wert</entry></row>
+        </thead>
+        <tbody>
+          <row><entry>[Parameter]</entry><entry>[Wert]</entry></row>
+        </tbody>
+      </tgroup>
+    </table>
+  </refbody>
+</reference>

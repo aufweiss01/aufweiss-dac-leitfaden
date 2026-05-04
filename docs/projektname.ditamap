@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE map PUBLIC "-//OASIS//DTD DITA 1.3 Map//EN" "map.dtd">
+<map xml:lang="de-DE">
+  <title>[Dokumenttitel]</title>
+  <topicmeta>
+    <othermeta name="doc-id" content=""/>
+    <othermeta name="doc-type" content=""/>
+  </topicmeta>
+  <mapref href="../shared/reuse/reusables.ditamap" format="ditamap"/>
+  <mapref href="reuse/reusables.ditamap" format="ditamap"/>
+  <mapref href="links/external_links.ditamap" format="ditamap"/>
+  <mapref href="links/internal_links.ditamap" format="ditamap"/>
+</map>
